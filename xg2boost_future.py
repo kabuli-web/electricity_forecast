@@ -5,7 +5,7 @@ from xgboost import XGBRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import matplotlib.pyplot as plt
-
+import holidays
 # ------------------------
 # 1. Data Loading & Preprocessing
 # ------------------------
@@ -34,8 +34,52 @@ df.ffill(inplace=True)
 df = df.filter(["Price","temperature_2m (°C)","cloud_cover (%)","wind_speed_100m (km/h)"])
 
 
-for lag in range(1, 14):
-    df[f"Price_lag_{lag}h"] = df["Price"].shift(lag) 
+for lag in range(1, 60):
+    df[f"Price_lag_{lag}d"] = df["Price"].shift(lag) 
+
+# lag_mean = 10
+
+# # Calculate mean of the previous 10 days' prices
+# df[f"{lag_mean}_days_avg"]  = df["Price"].shift(1).rolling(window=lag_mean).mean()
+
+
+day_of_year = df.index.dayofyear
+df['Yearly_Clock_sin'] = np.sin(2 * np.pi * day_of_year / 365.25)
+df['Yearly_Clock_cos'] = np.cos(2 * np.pi * day_of_year / 365.25)
+
+# ----------------------------------------
+# 2. Add "Is Holiday" Feature:
+# ----------------------------------------
+# For example, assuming Sweden (change to your country if needed)
+se_holidays = holidays.CountryHoliday('SE')
+
+df['Is_Holiday'] = pd.Series(df.index.date).isin(se_holidays).astype(int).values
+
+
+df['weekDay'] = df.index.day_name()
+
+df['weekDay'] = df['weekDay'].map({
+    'Monday': 0,
+    'Tuesday': 1,
+    'Wednesday': 2,
+    'Thursday': 3,
+    'Friday': 4,
+    'Saturday': 5,
+    'Sunday': 6
+})
+
+
+# ----------------------------------------
+# 4. Add Day Weight Feature:
+# ----------------------------------------
+# Example: Giving weekdays/weekends different weights based on typical electricity demand patterns
+def day_weight(day):
+    if day in [5, 6]:  # Saturday, Sunday
+        return 0.8  # lower weight for weekends (adjust as needed)
+    else:
+        return 1.0  # higher weight for weekdays
+
+df['Day_Weight'] = df.index.weekday.map(day_weight)
 
 
 # -------------------------------
@@ -43,8 +87,8 @@ for lag in range(1, 14):
 #    - Price
 #    - Weather
 # -------------------------------
-Forecast = 24  # forecast 7 days ahead
-weather_forecast = 14
+Forecast = 5  # forecast 7 days ahead
+weather_forecast = 5
 price_future_cols = []
 # weather_future_cols = []
 
@@ -82,14 +126,14 @@ df.dropna(inplace=True)
 # Clean up column names to remove disallowed characters
 X.columns = [str(col).replace('[', '').replace(']', '').replace('<', '') for col in X.columns]
 
-print(X.columns )
+# print(X.columns )
 # ------------------------
 # 3. Train-Test Split
 # ------------------------
 # Using a fixed random_state for reproducibility
 
 
-training_end = df.index.get_loc("2024-03-01")
+training_end = df.index.get_loc(pd.Timestamp("2024-03-01"))
 
 X_train = X.iloc[:training_end, :]
 y_train = y.iloc[:training_end]
@@ -115,10 +159,11 @@ y_pred = model.predict(X_test)
 mse = mean_squared_error(y_test, y_pred)
 mae = mean_absolute_error(y_test, y_pred)
 r2  = r2_score(y_test, y_pred)
-
+mape = np.mean(np.abs((y_test - y_pred) / y_test)) * 100
 print("Mean Squared Error (MSE):", mse)
 print("Mean Absolute Error (MAE):", mae)
 print("R-squared (R2):", r2)
+print("MAPE:", mape)
 
 # ------------------------
 # 6. Plotting Actual vs Predicted Values
@@ -130,30 +175,33 @@ y_test_df = pd.DataFrame(y_test, index=y_test.index, columns=columns).T
 y_pred_df = pd.DataFrame(y_pred, index=y_test.index, columns=columns).T
 
 
-mse_list, mae_list, r2_list = [], [], []
+mse_list, mae_list, r2_list,mapes_list = [], [], [], []
 
 for i in range(1,len(y_pred_df.columns),Forecast):
     mse = mean_squared_error(y_test_df.iloc[:, i], y_pred_df.iloc[:, i])
     mae = mean_absolute_error(y_test_df.iloc[:, i], y_pred_df.iloc[:, i])
     r2  = r2_score(y_test_df.iloc[:, i], y_pred_df.iloc[:, i])
+    mapes = np.mean(np.abs((y_test_df.iloc[:, i] - y_pred_df.iloc[:, i]) / y_test_df.iloc[:, i])) * 100
 
     mse_list.append(mse)
     mae_list.append(mae)
     r2_list.append(r2)
+    mapes_list.append(mapes)
 
-    # plt.figure(figsize=(10, 5))
-    # plt.plot(y_test_df.index, y_test_df.iloc[:, i], label="Actual")
-    # plt.plot(y_pred_df.index, y_pred_df.iloc[:, i], label="Predicted")
-    # plt.title(y_pred_df.columns[i])
-    # plt.xlabel("Date")
-    # plt.ylabel("Price")
-    # plt.legend()
-    # plt.grid()
-    # plt.show()
+#     plt.figure(figsize=(10, 5))
+#     plt.plot(y_test_df.index, y_test_df.iloc[:, i], label="Actual")
+#     plt.plot(y_pred_df.index, y_pred_df.iloc[:, i], label="Predicted")
+#     plt.title(y_pred_df.columns[i])
+#     plt.xlabel("Date")
+#     plt.ylabel("Price")
+#     plt.legend()
+#     plt.grid()
+#     plt.show()
 
-print("Average Mean Squared Error (MSE):", np.mean(mse_list))
-print("Average Mean Absolute Error (MAE):", np.mean(mae_list))
-print("Average R-squared (R2):", np.mean(r2_list))
+# print("Average Mean Squared Error (MSE):", np.mean(mse_list))
+# print("Average Mean Absolute Error (MAE):", np.mean(mae_list))
+# print("Average R-squared (R2):", np.mean(r2_list))
+# print("Average MAPE:", np.mean(mapes_list))
     
 
 
