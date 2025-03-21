@@ -6,6 +6,8 @@ from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, InputLayer
 from tensorflow.keras.optimizers import Adam
+import holidays
+import seaborn as sns
 
 # ------------------------
 # 1. Data Loading & Preprocessing
@@ -18,11 +20,67 @@ df.set_index("Date", inplace=True)
 df.sort_index(inplace=True)
 df.dropna(inplace=True)
 df = df[df["Price"] > 0]
+df["Price"] = abs(df["Price"])
 df = df[~((df.index >= '2021-08-06') & (df.index <= '2024-02-17'))]
+# df = df[(df.index >= '2023-01-01') & (df.index <= '2024-10-02')]
+
 
 # Add additional time features
 df["day"] = df.index.day
 df["month"] = df.index.month
+
+weather_forecast = 7
+
+weather_columns = []
+for d in range(1, weather_forecast+1):
+    # Weather
+    col_temp  = f"temp_d{d}"
+    col_cloud = f"cloud_d{d}"
+    col_wind  = f"wind_d{d}"
+    weather_columns.extend([col_temp, col_cloud, col_wind])
+    df[col_temp]  = df["temperature_2m (°C)"].shift(-d)
+    df[col_cloud] = df["cloud_cover (%)"].shift(-d)
+    df[col_wind]  = df["wind_speed_100m (km/h)"].shift(-d)
+
+day_of_year = df.index.dayofyear
+df['Yearly_Clock_sin'] = np.sin(2 * np.pi * day_of_year / 365.25)
+df['Yearly_Clock_cos'] = np.cos(2 * np.pi * day_of_year / 365.25)
+
+
+se_holidays = holidays.CountryHoliday('SE')
+
+df['Is_Holiday'] = pd.Series(df.index.date).isin(se_holidays).astype(int).values
+
+
+df['weekDay'] = df.index.day_name()
+
+
+df['weekDay'] = df['weekDay'].map({
+    'Monday': 0,
+    'Tuesday': 1,
+    'Wednesday': 2,
+    'Thursday': 3,
+    'Friday': 4,
+    'Saturday': 5,
+    'Sunday': 6
+})
+
+corr_matrix = df.corr()
+
+# Extract correlations with 'Price' (dropping Price vs. Price)
+corr_with_price = corr_matrix['Price'].drop(columns=['Price',"Metered [MWh]","Profiled [MWh]","Other [MWh]"])
+
+# Optionally sort the correlations for a cleaner look
+corr_with_price = corr_with_price.sort_values()
+
+# Create a bar plot
+plt.figure(figsize=(10, 6))
+sns.barplot(x=corr_with_price.index, y=corr_with_price.values, palette="viridis")
+plt.xticks(rotation=45)
+plt.ylabel('Correlation with Price')
+plt.title('Feature Correlations with Price')
+plt.tight_layout()
+plt.show()
 
 
 # ------------------------
@@ -30,13 +88,15 @@ df["month"] = df.index.month
 # ------------------------
 # We want to scale features and target separately.
 # First, fit a scaler for the features (all columns except Price)
-# df["Consumption Total [MWh]"] = abs(df["Consumption Total [MWh]"])
+df["Consumption Total [MWh]"] = abs(df["Consumption Total [MWh]"])
 
-# feature_columns = ["day","month","gas pr","oil pr"]
-# scaler_features = MinMaxScaler()
-# df_features_scaled = pd.DataFrame(scaler_features.fit_transform(df[feature_columns]),
-#                                   index=df.index,
-#                                   columns=feature_columns)
+feature_columns = ["Price","temperature_2m (°C)","cloud_cover (%)","wind_speed_100m (km/h)","gas pr","oil pr","Production Total [MWh]","Nuclear [MWh]","Thermal [MWh]","Wind Onshore [MWh]","Consumption Total [MWh]","day","month"]
+feature_columns.extend(weather_columns)
+feature_columns.extend(["Yearly_Clock_sin", "Yearly_Clock_cos", "Is_Holiday", "weekDay"])
+scaler_features = MinMaxScaler()
+df_features_scaled = pd.DataFrame(scaler_features.fit_transform(df[feature_columns]),
+                                  index=df.index,
+                                  columns=feature_columns)
 
 # # Next, fit a scaler for the target Price
 target_scaler = MinMaxScaler()
@@ -46,8 +106,8 @@ df_target_scaled = pd.DataFrame(target_scaler.fit_transform(df[["Price"]]),
 
 # Combine scaled features and target back into one DataFrame
 
-df["Price"] = df_target_scaled["Price"]
-
+df_features_scaled["Price"] = df_target_scaled["Price"]
+df = df_features_scaled
 # For sequence creation we will use the scaled DataFrame.
 # You can choose to include all features or only a subset.
 # For example, if you want to use Price, day, month, and other features, ensure they are in df_scaled.
@@ -55,7 +115,8 @@ price = df.filter(["Price"])  # using the entire scaled df
 
 print("Scaled DataFrame columns:", price.columns)
 
-def train_lstm(price,lookback=60, future=7, hidden_layers=10, epochs=10, batch_size=8):
+def train_lstm(price,lookback=60, future=7, hidden_layers=13, epochs=20, batch_size=15, learning_rate=0.07256196):
+
     
     # ------------------------
     # 3. Create Sequences for Time Series Forecasting
@@ -80,9 +141,14 @@ def train_lstm(price,lookback=60, future=7, hidden_layers=10, epochs=10, batch_s
     # ------------------------
     # 4. Split Data into Training and Testing Sets (Time-Ordered Split)
     # ------------------------
-    split_idx = int(0.8 * len(X_seq))
-    X_train, X_test = X_seq[:split_idx], X_seq[split_idx:]
-    y_train, y_test = y_seq[:split_idx], y_seq[split_idx:]
+
+    
+    training_end = df.index.get_loc(pd.Timestamp("2024-03-01"))
+    X_train = X_seq[:training_end]
+    y_train = y_seq[:training_end]
+    X_test  = X_seq[training_end:]
+    y_test  = y_seq[training_end:]
+    
 
     print("X_train shape:", X_train.shape)
     print("X_test shape:", X_test.shape)
@@ -90,8 +156,8 @@ def train_lstm(price,lookback=60, future=7, hidden_layers=10, epochs=10, batch_s
     print("y_test shape:", y_test.shape)
 
     # Also split the corresponding datetime indices for plotting
-    train_index = time_index[:split_idx]
-    test_index  = time_index[split_idx:]
+    train_index = time_index[:training_end]
+    test_index  = time_index[training_end:]
     print("Length of test index:", len(test_index))
 
     # ------------------------
@@ -101,76 +167,79 @@ def train_lstm(price,lookback=60, future=7, hidden_layers=10, epochs=10, batch_s
     # LSTM expects input shape = (time_steps, features)
     model.add(InputLayer((X_train.shape[1], X_train.shape[2])))
     model.add(LSTM(hidden_layers))
-    model.add(Dense(7, activation='linear'))  # output: 10-step forecast for Price
-    model.compile(optimizer=Adam(learning_rate=0.0001), loss='mse')
+    model.add(Dense(future, activation='linear'))  # output: 10-step forecast for Price
+    model.compile(optimizer=Adam(learning_rate=learning_rate), loss='mse')
+
+
 
     # Train the model
     history = model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, validation_split=0.1, verbose=1)
 
-    # ------------------------
-    # 6. Predictions and Evaluation
-    # ------------------------
-    # For example, we pick one sequence from the test set.
-    test_sequences = [80,120,150,190,250,270]
-    # This will be a single sample with shape (1, lookback, num_features)
 
-    def run_test(test_sequence):
+    def run_test():
+        i=0
+        y_pred_scaled = []
+        y_test_scaled = []
+        while i < len(X_test):
+            prdict = model.predict(X_test[i:i+1])
+            prdict = target_scaler.inverse_transform(prdict)[0]
+            y_test_scaled.append(target_scaler.inverse_transform(y_test[i:i+1])[0])
+            y_pred_scaled.append(prdict)
+            i+=future
 
-        y_pred_scaled = model.predict(X_test[test_sequence:test_sequence+1])
 
+        
         # Inverse transform predictions and actual values to original scale using target_scaler.
-        y_pred = target_scaler.inverse_transform(y_pred_scaled)[0]
-        y_test_inv = target_scaler.inverse_transform(y_test[test_sequence:test_sequence+1])[0]
-    
+        y_pred = np.array(y_pred_scaled).flatten()
+        y_test_inv = np.array(y_test_scaled).flatten()
+
+        
         # Calculate evaluation metrics on the original scale
         mse_val = mean_squared_error(y_test_inv, y_pred)
         mae_val = mean_absolute_error(y_test_inv, y_pred)
         r2_val  = r2_score(y_test_inv, y_pred)
+        mape = np.mean(np.abs((y_test_inv - y_pred) / y_test_inv)) * 100
+
+        return mse_val,mae_val,r2_val,mape ,y_test_scaled, y_pred_scaled
 
 
-        # print("predicted",y_pred)
-        # print("actual",y_test_inv)
+    mse,mae,r2,mape,real,pred =  run_test()
+    
+    x = future
 
-        # print("Mean Squared Error (MSE):", mse_val)
-        # print("Mean Absolute Error (MAE):", mae_val)
-        # print("R-squared (R2):", r2_val)
+    print("Length of real:", len(real))
+    print("Length of pred:", len(pred))
 
-        
-        # # ------------------------
-        # # 7. Plotting Actual vs Predicted
-        # # ------------------------
-        # # Here we assume that for this sample, our forecast horizon is 10 steps.
-        # # Let's create a forecast index starting from a given test timestamp.
-        # start_date = test_index[test_sequence:test_sequence+1][0]
-        # forecast_index = pd.date_range(start=start_date, periods=future, freq='D')
+    real_ = np.array(real).flatten()
+    pred_ = np.array(pred).flatten()
+    
+    dates = []
 
-        # results = pd.DataFrame({"Actual": y_test_inv.flatten(), "Predicted": y_pred.flatten()}, index=forecast_index)
-        # results = results.sort_index()
+    for i in range(0,len(X_test),future):
+        # Convert the column header to a datetime object
+        base_date = pd.to_datetime(test_index[i+1])
+        # Create a date range starting at base_date with 'forecast' periods (one per day)
+        forecast_dates = pd.date_range(start=base_date, periods=future, freq='D')
 
-        # plt.figure(figsize=(10, 6))
-        # plt.plot(results.index, results['Actual'], label='Actual', marker='o')
-        # plt.plot(results.index, results['Predicted'], label='Predicted', marker='x')
-        # plt.xlabel("Date")
-        # plt.ylabel("Price")
-        # plt.title("Actual vs Predicted Price (LSTM)")
-        # plt.legend()
-        # plt.xticks(rotation=45)
-        # plt.show()
+        dates.extend(forecast_dates)
 
-        return mse_val,mae_val,r2_val
+    dates = np.array(dates).flatten()
+    print("Length of dates:", len(dates))
+    plt.figure(figsize=(20, 10))
+    plt.plot(dates,real_, label='Actual', marker='o')
+    plt.plot(dates,pred_, label='Predicted', marker='x')
+    plt.xlabel("Date")
+    plt.ylabel("Price")
+    plt.title("Actual vs Predicted Price (LSTM)")
+    plt.legend()
+    plt.grid()
+    plt.show()
 
-    mses = []
-    maes = []
-    r2s = []
+    print("Average Mean Squared Error (MSE):", np.mean(mse)) 
+    print("Average Mean Absolute Error (MAE):", np.mean(mae))
+    print("Average R-squared (R2):", np.mean(r2))
+    print("MAPE:", mape)
 
-    for i in test_sequences:
-        mse,mae,r2 =  run_test(i)
-        mses.append(mse)
-        maes.append(mae)
-        r2s.append(r2)
+    return mse,mae, r2
 
-    # print("Average Mean Squared Error (MSE):", np.mean(mses)) 
-    # print("Average Mean Absolute Error (MAE):", np.mean(maes))
-    # print("Average R-squared (R2):", np.mean(r2s))
-
-    return np.mean(mses),np.mean(maes),np.mean(r2s)
+train_lstm(price=price)

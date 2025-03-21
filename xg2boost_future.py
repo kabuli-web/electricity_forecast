@@ -6,9 +6,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import matplotlib.pyplot as plt
 import holidays
-# ------------------------
-# 1. Data Loading & Preprocessing
-# ------------------------
+
 df = pd.read_csv("v2_data.csv")
 
 # Convert Date/Time to datetime and set as index
@@ -16,7 +14,7 @@ df["Date"] = pd.to_datetime(df["Date"])
 df.set_index("Date", inplace=True)
 df.sort_index(inplace=True)
  # Lag in hours
-df = df[~((df.index >= '2021-08-01') & (df.index <= '2024-03-01'))]
+# df = df[~((df.index >= '2021-08-01') & (df.index <= '2024-03-01'))]
 
 df["Price"] = abs(df["Price"])
 
@@ -24,14 +22,10 @@ df = df.asfreq('D')
 
 df.ffill(inplace=True)
 
-# print("Price Mean", df["Price"].mean())
-# print("Price Max", df["Price"].max())
-# print("Price Min", df["Price"].min())
-# print("Price Median", df["Price"].median())
 
-# Drop unnecessary column
-# df.drop(columns=["snowfall (cm)","Consumption Total [MWh]"], inplace=True)
-df = df.filter(["Price","temperature_2m (°C)","cloud_cover (%)","wind_speed_100m (km/h)"])
+df = df.filter(["Price","temperature_2m (°C)","cloud_cover (%)","wind_speed_100m (km/h)","gas pr","oil pr","Production Total [MWh]","Nuclear [MWh]","Thermal [MWh]","Wind Onshore [MWh]","Consumption Total [MWh]"])
+df["Consumption Total [MWh]"] = abs(df["Consumption Total [MWh]"])
+
 
 
 for lag in range(1, 60):
@@ -47,10 +41,7 @@ day_of_year = df.index.dayofyear
 df['Yearly_Clock_sin'] = np.sin(2 * np.pi * day_of_year / 365.25)
 df['Yearly_Clock_cos'] = np.cos(2 * np.pi * day_of_year / 365.25)
 
-# ----------------------------------------
-# 2. Add "Is Holiday" Feature:
-# ----------------------------------------
-# For example, assuming Sweden (change to your country if needed)
+
 se_holidays = holidays.CountryHoliday('SE')
 
 df['Is_Holiday'] = pd.Series(df.index.date).isin(se_holidays).astype(int).values
@@ -69,10 +60,7 @@ df['weekDay'] = df['weekDay'].map({
 })
 
 
-# ----------------------------------------
-# 4. Add Day Weight Feature:
-# ----------------------------------------
-# Example: Giving weekdays/weekends different weights based on typical electricity demand patterns
+
 def day_weight(day):
     if day in [5, 6]:  # Saturday, Sunday
         return 0.8  # lower weight for weekends (adjust as needed)
@@ -82,11 +70,7 @@ def day_weight(day):
 df['Day_Weight'] = df.index.weekday.map(day_weight)
 
 
-# -------------------------------
-# 2. Aggregate to Daily Averages
-#    - Price
-#    - Weather
-# -------------------------------
+
 Forecast = 5  # forecast 7 days ahead
 weather_forecast = 5
 price_future_cols = []
@@ -97,8 +81,6 @@ for d in range(1, Forecast+1):
     col_price = f"Price_d{d}"
     df[col_price] = df["Price"].shift(-d)
     price_future_cols.append(col_price)
-
-    
 
 
 for d in range(1, weather_forecast+1):
@@ -112,9 +94,8 @@ for d in range(1, weather_forecast+1):
     df[col_wind]  = df["wind_speed_100m (km/h)"].shift(-d)
 
 df.dropna(inplace=True)
-# ------------------------
-# 2. Prepare Features and Target Variable
-# ------------------------
+
+
 columns_to_drop = ["Price"] + price_future_cols
 X = df.drop(columns=columns_to_drop)
 y = df.filter(price_future_cols)
@@ -126,11 +107,7 @@ df.dropna(inplace=True)
 # Clean up column names to remove disallowed characters
 X.columns = [str(col).replace('[', '').replace(']', '').replace('<', '') for col in X.columns]
 
-# print(X.columns )
-# ------------------------
-# 3. Train-Test Split
-# ------------------------
-# Using a fixed random_state for reproducibility
+
 
 
 training_end = df.index.get_loc(pd.Timestamp("2024-03-01"))
@@ -138,72 +115,77 @@ training_end = df.index.get_loc(pd.Timestamp("2024-03-01"))
 X_train = X.iloc[:training_end, :]
 y_train = y.iloc[:training_end]
 
-X_test  = X.iloc[training_end+24:, :]
-y_test  = y.iloc[training_end+24:]
+X_test  = X.iloc[training_end:, :]
+y_test  = y.iloc[training_end:]
 
 
-# ------------------------
-# 4. Build and Train the XGBoost Model
-# ------------------------
+
 model = XGBRegressor(objective='reg:squarederror', random_state=42)
 model.fit(X_train, y_train)
 
 model.save_model('xgboost_model.json')
 
-# ------------------------
-# 5. Predictions and Evaluation
-# ------------------------
+
 y_pred = model.predict(X_test)
-# print(y_test[5:])
 
-mse = mean_squared_error(y_test, y_pred)
-mae = mean_absolute_error(y_test, y_pred)
-r2  = r2_score(y_test, y_pred)
-mape = np.mean(np.abs((y_test - y_pred) / y_test)) * 100
-print("Mean Squared Error (MSE):", mse)
-print("Mean Absolute Error (MAE):", mae)
-print("R-squared (R2):", r2)
-print("MAPE:", mape)
-
-# ------------------------
-# 6. Plotting Actual vs Predicted Values
-# ------------------------
 n_outputs = len(y_test.columns)
 columns = [f"Price_d{i+1}" for i in range(n_outputs)]
+
+
 
 y_test_df = pd.DataFrame(y_test, index=y_test.index, columns=columns).T
 y_pred_df = pd.DataFrame(y_pred, index=y_test.index, columns=columns).T
 
 
 mse_list, mae_list, r2_list,mapes_list = [], [], [], []
+real = []
+pred = []
+dates = []
 
 for i in range(1,len(y_pred_df.columns),Forecast):
     mse = mean_squared_error(y_test_df.iloc[:, i], y_pred_df.iloc[:, i])
     mae = mean_absolute_error(y_test_df.iloc[:, i], y_pred_df.iloc[:, i])
     r2  = r2_score(y_test_df.iloc[:, i], y_pred_df.iloc[:, i])
     mapes = np.mean(np.abs((y_test_df.iloc[:, i] - y_pred_df.iloc[:, i]) / y_test_df.iloc[:, i])) * 100
-
+    real.append(y_test_df.iloc[:, i])
+    pred.append(y_pred_df.iloc[:, i])
+  
+    base_date = pd.to_datetime(y_pred_df.columns[i+1])
+    forecast_dates = pd.date_range(start=base_date, periods=Forecast, freq='D')    
+    dates.extend(forecast_dates)
     mse_list.append(mse)
     mae_list.append(mae)
     r2_list.append(r2)
     mapes_list.append(mapes)
-
-#     plt.figure(figsize=(10, 5))
-#     plt.plot(y_test_df.index, y_test_df.iloc[:, i], label="Actual")
-#     plt.plot(y_pred_df.index, y_pred_df.iloc[:, i], label="Predicted")
-#     plt.title(y_pred_df.columns[i])
-#     plt.xlabel("Date")
-#     plt.ylabel("Price")
-#     plt.legend()
-#     plt.grid()
-#     plt.show()
-
-# print("Average Mean Squared Error (MSE):", np.mean(mse_list))
-# print("Average Mean Absolute Error (MAE):", np.mean(mae_list))
-# print("Average R-squared (R2):", np.mean(r2_list))
-# print("Average MAPE:", np.mean(mapes_list))
     
 
+
+real = np.array(real)
+pred = np.array(pred)
+
+min_len = min(real.shape[0], pred.shape[0])
+
+mse = mean_squared_error(real, pred)
+mae = mean_absolute_error(real, pred)
+r2  = r2_score(real, pred)
+mape = np.mean(np.abs((real - pred) / real)) * 100
+
+print("Mean Squared Error (MSE):", mse)
+print("Mean Absolute Error (MAE):", mae)
+print("R-squared (R2):", r2)
+print("MAPE:", mape)
+
+
+
+plt.figure(figsize=(20, 10))
+plt.plot(dates,real.flatten(), label="Actual")
+plt.plot(dates,pred.flatten(), label="Predicted")
+plt.xlabel("Date")
+plt.ylabel("Price")
+plt.title("Actual vs Predicted Price (XGBoost)")
+plt.legend()
+plt.grid()
+plt.show()
 
 
 joblib.dump(model,'xg2boost_lag_future.pkl')
